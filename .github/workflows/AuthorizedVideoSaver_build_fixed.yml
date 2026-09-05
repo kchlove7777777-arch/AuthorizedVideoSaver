@@ -1,0 +1,380 @@
+name: Build AuthorizedVideoSaver APK
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Create Android project
+        run: |
+          mkdir -p app/src/main/java/com/example/authorizedvideosaver
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "AuthorizedVideoSaver"
+          include ":app"
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id "com.android.application" version "8.7.3" apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id "com.android.application"
+          }
+
+          android {
+              namespace "com.example.authorizedvideosaver"
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "com.example.authorizedvideosaver"
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 4
+                  versionName "1.0.4"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission
+                  android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="28"/>
+
+              <application
+                  android:allowBackup="true"
+                  android:label="허용 영상 저장기"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND"/>
+                          <category android:name="android.intent.category.DEFAULT"/>
+                          <data android:mimeType="text/plain"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/authorizedvideosaver/MainActivity.java <<'EOF'
+          package com.example.authorizedvideosaver;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.DownloadManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Typeface;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.CheckBox;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.net.URL;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+
+          public class MainActivity extends Activity {
+              private EditText urlInput;
+              private CheckBox wifiOnly;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  buildUi();
+                  receiveSharedText(getIntent());
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  setIntent(intent);
+                  receiveSharedText(intent);
+              }
+
+              private void buildUi() {
+                  int pad = dp(18);
+
+                  ScrollView scroll = new ScrollView(this);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(pad, pad, pad, pad);
+                  scroll.addView(root);
+
+                  TextView title = new TextView(this);
+                  title.setText("허용 영상 저장기");
+                  title.setTextSize(25);
+                  title.setTypeface(Typeface.DEFAULT_BOLD);
+                  title.setGravity(Gravity.CENTER_HORIZONTAL);
+                  root.addView(title);
+
+                  TextView info = new TextView(this);
+                  info.setText(
+                      "직접 다운로드가 허용된 MP4·WebM 등의 영상 주소를 저장합니다.\n" +
+                      "YouTube 주소는 파일 추출 없이 YouTube 앱/브라우저로 엽니다."
+                  );
+                  info.setTextSize(15);
+                  info.setPadding(0, dp(14), 0, dp(14));
+                  root.addView(info);
+
+                  urlInput = new EditText(this);
+                  urlInput.setHint("영상 주소를 입력하세요");
+                  urlInput.setMinLines(4);
+                  urlInput.setGravity(Gravity.TOP);
+                  root.addView(urlInput, new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  ));
+
+                  wifiOnly = new CheckBox(this);
+                  wifiOnly.setText("Wi-Fi에서만 다운로드");
+                  wifiOnly.setChecked(false);
+                  root.addView(wifiOnly);
+
+                  Button download = new Button(this);
+                  download.setText("다운로드");
+                  download.setOnClickListener(v -> handleDownload());
+                  root.addView(download);
+
+                  Button paste = new Button(this);
+                  paste.setText("클립보드 붙여넣기");
+                  paste.setOnClickListener(v -> pasteClipboard());
+                  root.addView(paste);
+
+                  Button openDownloads = new Button(this);
+                  openDownloads.setText("다운로드 목록 열기");
+                  openDownloads.setOnClickListener(v -> {
+                      try {
+                          startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS));
+                      } catch (Exception e) {
+                          startActivity(new Intent(Settings.ACTION_INTERNAL_STORAGE_SETTINGS));
+                      }
+                  });
+                  root.addView(openDownloads);
+
+                  setContentView(scroll);
+              }
+
+              private void handleDownload() {
+                  String text = urlInput.getText().toString().trim();
+                  if (text.isEmpty()) {
+                      toast("주소를 입력하세요.");
+                      return;
+                  }
+
+                  String[] lines = text.split("\\n+");
+                  int started = 0;
+
+                  for (String raw : lines) {
+                      String url = raw.trim();
+                      if (url.isEmpty()) continue;
+
+                      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                          toast("http 또는 https 주소만 사용할 수 있습니다.");
+                          continue;
+                      }
+
+                      if (isYouTube(url)) {
+                          openYouTube(url);
+                      } else {
+                          if (Build.VERSION.SDK_INT <= 28 &&
+                              checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                  != PackageManager.PERMISSION_GRANTED) {
+                              requestPermissions(
+                                  new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 100
+                              );
+                              toast("저장 권한을 허용한 뒤 다시 다운로드하세요.");
+                              return;
+                          }
+
+                          if (enqueue(url)) started++;
+                      }
+                  }
+
+                  if (started > 0) {
+                      toast(started + "개 다운로드를 시작했습니다.");
+                  }
+              }
+
+              private boolean isYouTube(String url) {
+                  String u = url.toLowerCase(Locale.ROOT);
+                  return u.contains("youtube.com/") ||
+                         u.contains("youtu.be/") ||
+                         u.contains("youtube-nocookie.com/");
+              }
+
+              private void openYouTube(String url) {
+                  try {
+                      Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                      startActivity(intent);
+                  } catch (Exception e) {
+                      toast("YouTube 링크를 열 수 없습니다.");
+                  }
+              }
+
+              private boolean enqueue(String url) {
+                  try {
+                      Uri uri = Uri.parse(url);
+                      String fileName = guessFileName(url);
+
+                      DownloadManager.Request req = new DownloadManager.Request(uri);
+                      req.setTitle(fileName);
+                      req.setDescription("영상 다운로드 중");
+                      req.setNotificationVisibility(
+                          DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                      );
+                      req.setAllowedOverMetered(!wifiOnly.isChecked());
+                      req.setAllowedOverRoaming(false);
+                      req.setDestinationInExternalPublicDir(
+                          Environment.DIRECTORY_DOWNLOADS,
+                          "AuthorizedVideoSaver/" + fileName
+                      );
+
+                      DownloadManager dm =
+                          (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                      dm.enqueue(req);
+                      return true;
+                  } catch (Exception e) {
+                      toast("다운로드 시작 실패: " + e.getMessage());
+                      return false;
+                  }
+              }
+
+              private String guessFileName(String url) {
+                  try {
+                      String path = new URL(url).getPath();
+                      String last = path.substring(path.lastIndexOf('/') + 1);
+                      if (!last.isEmpty() && last.contains(".")) {
+                          last = last.replaceAll("[^a-zA-Z0-9._-]", "_");
+                          if (last.length() > 80) last = last.substring(last.length() - 80);
+                          return last;
+                      }
+                  } catch (Exception ignored) {}
+
+                  return "video_" +
+                      new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) +
+                      ".mp4";
+              }
+
+              private void pasteClipboard() {
+                  android.content.ClipboardManager cm =
+                      (android.content.ClipboardManager)
+                          getSystemService(Context.CLIPBOARD_SERVICE);
+
+                  if (cm != null && cm.hasPrimaryClip() &&
+                      cm.getPrimaryClip() != null &&
+                      cm.getPrimaryClip().getItemCount() > 0) {
+                      CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+                      if (t != null) urlInput.setText(t.toString());
+                  } else {
+                      toast("클립보드에 주소가 없습니다.");
+                  }
+              }
+
+              private void receiveSharedText(Intent intent) {
+                  if (intent == null) return;
+                  if (Intent.ACTION_SEND.equals(intent.getAction()) &&
+                      "text/plain".equals(intent.getType())) {
+                      String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
+                      if (shared != null && urlInput != null) {
+                          urlInput.setText(shared);
+                      }
+                  }
+              }
+
+              private int dp(int value) {
+                  return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private void toast(String text) {
+                  Toast.makeText(this, text, Toast.LENGTH_LONG).show();
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Verify APK signature
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose \
+            app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk AuthorizedVideoSaver.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuthorizedVideoSaver-APK
+          path: AuthorizedVideoSaver.apk
+          if-no-files-found: error
