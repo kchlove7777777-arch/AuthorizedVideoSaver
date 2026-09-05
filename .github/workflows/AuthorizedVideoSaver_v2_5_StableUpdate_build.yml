@@ -1,0 +1,767 @@
+name: Build AuthorizedVideoSaver v2.5 Stable Update APK
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build_v2:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Create Android project
+        run: |
+          mkdir -p app/src/main/java/com/example/authorizedvideosaver
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "AuthorizedVideoSaverV2"
+          include ":app"
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id "com.android.application" version "8.7.3" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id "com.android.application"
+          }
+
+          android {
+              namespace "com.example.authorizedvideosaver"
+              compileSdk 35
+
+              signingConfigs {
+                  stableUpdate {
+                      storeFile file("../authorizedvideosaver-update.jks")
+                      storePassword "avs25update"
+                      keyAlias "authorizedvideosaver"
+                      keyPassword "avs25update"
+                  }
+              }
+
+              defaultConfig {
+                  applicationId "com.example.authorizedvideosaver.v2"
+                  minSdk 29
+                  targetSdk 35
+                  versionCode 25
+                  versionName "2.5.0"
+
+                  ndk {
+                      abiFilters "arm64-v8a"
+                  }
+              }
+
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      signingConfig signingConfigs.stableUpdate
+                  }
+              }
+          }
+
+          dependencies {
+              implementation "io.github.junkfood02.youtubedl-android:library:0.18.1"
+              implementation "io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1"
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:extractNativeLibs="true"
+                  android:label="허용 영상 저장기 v2.5"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/authorizedvideosaver/MainActivity.java <<'EOF'
+          package com.example.authorizedvideosaver;
+
+          import android.app.Activity;
+          import android.app.DownloadManager;
+          import android.content.ContentResolver;
+          import android.content.ContentValues;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Build;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.text.Editable;
+          import android.text.TextUtils;
+          import android.text.TextWatcher;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.AdapterView;
+          import android.widget.ArrayAdapter;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ProgressBar;
+          import android.widget.ScrollView;
+          import android.widget.Spinner;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import com.yausername.ffmpeg.FFmpeg;
+          import com.yausername.youtubedl_android.YoutubeDL;
+          import com.yausername.youtubedl_android.YoutubeDLRequest;
+
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.util.Arrays;
+          import java.util.Comparator;
+          import java.util.Locale;
+          import java.util.UUID;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          import kotlin.Unit;
+          import kotlin.jvm.functions.Function3;
+
+          public class MainActivity extends Activity {
+              private EditText urlInput;
+              private Spinner formatSpinner;
+              private Spinner qualitySpinner;
+              private TextView qualityLabel;
+              private Button downloadButton;
+              private Button cancelButton;
+              private ProgressBar progressBar;
+              private TextView statusView;
+              private TextView detailView;
+
+              private final ExecutorService executor = Executors.newSingleThreadExecutor();
+              private volatile boolean ready = false;
+              private volatile boolean downloading = false;
+              private String processId = null;
+              private SharedPreferences preferences;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  preferences = getSharedPreferences("avs_settings", MODE_PRIVATE);
+                  buildUi();
+                  applyClipboardYoutubeUrlIfPresent();
+                  receiveSharedText(getIntent());
+                  initializeDownloader();
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  setIntent(intent);
+                  receiveSharedText(intent);
+              }
+
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  if (downloading && processId != null) {
+                      try { YoutubeDL.getInstance().destroyProcessById(processId); } catch (Exception ignored) {}
+                  }
+                  executor.shutdownNow();
+              }
+
+              private void buildUi() {
+                  int pad = dp(18);
+                  ScrollView scroll = new ScrollView(this);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(pad, pad, pad, pad);
+                  scroll.addView(root);
+
+                  TextView title = new TextView(this);
+                  title.setText("허용 영상 저장기 v2.5");
+                  title.setTextSize(25);
+                  title.setGravity(Gravity.CENTER_HORIZONTAL);
+                  title.setPadding(0, 0, 0, dp(10));
+                  root.addView(title);
+
+                  TextView notice = new TextView(this);
+                  notice.setText("클립보드에 새 YouTube 주소가 있으면 앱 실행 시 자동 입력하고, 없으면 마지막 주소를 불러옵니다. 영상은 MP4, 오디오는 MP3로 저장할 수 있습니다. 본인이 올린 영상 또는 다운로드 허가를 받은 영상만 저장하세요. 로그인·쿠키·유료/비공개 영상·DRM 우회 기능은 포함하지 않습니다.");
+                  notice.setTextSize(14);
+                  notice.setPadding(0, 0, 0, dp(14));
+                  root.addView(notice);
+
+                  urlInput = new EditText(this);
+                  urlInput.setHint("YouTube 주소를 붙여넣으세요");
+                  urlInput.setMinLines(3);
+                  urlInput.setGravity(Gravity.TOP);
+                  String savedUrl = preferences.getString("last_url", "");
+                  if (savedUrl != null && !savedUrl.trim().isEmpty()) {
+                      urlInput.setText(savedUrl);
+                      urlInput.setSelection(urlInput.getText().length());
+                  }
+                  urlInput.addTextChangedListener(new TextWatcher() {
+                      @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+                      @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+                      @Override public void afterTextChanged(Editable s) {
+                          preferences.edit().putString("last_url", s == null ? "" : s.toString().trim()).apply();
+                      }
+                  });
+                  root.addView(urlInput, new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  ));
+
+                  Button pasteButton = new Button(this);
+                  pasteButton.setText("클립보드 붙여넣기");
+                  pasteButton.setOnClickListener(v -> pasteClipboard());
+                  root.addView(pasteButton);
+
+                  TextView formatLabel = new TextView(this);
+                  formatLabel.setText("저장 형식");
+                  formatLabel.setTextSize(16);
+                  formatLabel.setPadding(0, dp(10), 0, dp(4));
+                  root.addView(formatLabel);
+
+                  formatSpinner = new Spinner(this);
+                  String[] formats = {"영상 MP4", "음원 MP3"};
+                  ArrayAdapter<String> formatAdapter = new ArrayAdapter<>(
+                      this, android.R.layout.simple_spinner_dropdown_item, formats
+                  );
+                  formatSpinner.setAdapter(formatAdapter);
+                  int savedFormat = preferences.getInt("save_format", 0);
+                  if (savedFormat < 0 || savedFormat > 1) savedFormat = 0;
+                  formatSpinner.setSelection(savedFormat);
+                  root.addView(formatSpinner);
+
+                  qualityLabel = new TextView(this);
+                  qualityLabel.setText("화질 선택");
+                  qualityLabel.setTextSize(16);
+                  qualityLabel.setPadding(0, dp(10), 0, dp(4));
+                  root.addView(qualityLabel);
+
+                  qualitySpinner = new Spinner(this);
+                  String[] qualities = {"최고 화질", "1080p 이하", "720p 이하", "480p 이하"};
+                  ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                      this, android.R.layout.simple_spinner_dropdown_item, qualities
+                  );
+                  qualitySpinner.setAdapter(adapter);
+                  qualitySpinner.setSelection(1);
+                  root.addView(qualitySpinner);
+
+                  formatSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                      @Override
+                      public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                          preferences.edit().putInt("save_format", position).apply();
+                          boolean mp3 = position == 1;
+                          qualityLabel.setVisibility(mp3 ? View.GONE : View.VISIBLE);
+                          qualitySpinner.setVisibility(mp3 ? View.GONE : View.VISIBLE);
+                          if (downloadButton != null) {
+                              downloadButton.setText(mp3 ? "MP3 음원으로 저장" : "YouTube 영상 다운로드");
+                          }
+                      }
+                      @Override public void onNothingSelected(AdapterView<?> parent) {}
+                  });
+
+                  downloadButton = new Button(this);
+                  downloadButton.setText(formatSpinner.getSelectedItemPosition() == 1 ? "MP3 음원으로 저장" : "YouTube 영상 다운로드");
+                  downloadButton.setEnabled(false);
+                  downloadButton.setOnClickListener(v -> startDownload());
+                  root.addView(downloadButton);
+                  if (formatSpinner.getSelectedItemPosition() == 1) {
+                      qualityLabel.setVisibility(View.GONE);
+                      qualitySpinner.setVisibility(View.GONE);
+                  }
+
+                  cancelButton = new Button(this);
+                  cancelButton.setText("다운로드 취소");
+                  cancelButton.setEnabled(false);
+                  cancelButton.setOnClickListener(v -> cancelDownload());
+                  root.addView(cancelButton);
+
+                  progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  progressBar.setMax(100);
+                  progressBar.setProgress(0);
+                  root.addView(progressBar, new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT, dp(20)
+                  ));
+
+                  statusView = new TextView(this);
+                  statusView.setText("다운로드 엔진 준비 중...");
+                  statusView.setTextSize(16);
+                  statusView.setPadding(0, dp(10), 0, dp(4));
+                  root.addView(statusView);
+
+                  detailView = new TextView(this);
+                  detailView.setText("저장 위치: 내 파일 → 다운로드 → AuthorizedVideoSaver");
+                  detailView.setTextSize(13);
+                  root.addView(detailView);
+
+                  Button openButton = new Button(this);
+                  openButton.setText("다운로드 폴더 열기");
+                  openButton.setOnClickListener(v -> openDownloadFolder());
+                  root.addView(openButton);
+
+                  setContentView(scroll);
+              }
+
+              private void initializeDownloader() {
+                  executor.execute(() -> {
+                      try {
+                          runOnUiThread(() -> statusView.setText("다운로드 엔진 초기화 중..."));
+                          FFmpeg.getInstance().init(getApplicationContext());
+                          YoutubeDL.getInstance().init(getApplicationContext());
+                          runOnUiThread(() -> statusView.setText("yt-dlp 최신 버전 확인 중..."));
+                          try {
+                              YoutubeDL.getInstance().updateYoutubeDL(getApplicationContext(), YoutubeDL.UpdateChannel._STABLE);
+                          } catch (Exception updateError) {
+                              // 업데이트 확인 실패 시에도 번들 엔진으로 실행은 계속합니다.
+                          }
+                          String engineVersion;
+                          try {
+                              engineVersion = YoutubeDL.getInstance().versionName(getApplicationContext());
+                          } catch (Exception ignored) {
+                              engineVersion = null;
+                          }
+                          final String shownVersion = engineVersion;
+                          ready = true;
+                          runOnUiThread(() -> {
+                              statusView.setText("준비 완료");
+                              if (shownVersion != null && !shownVersion.trim().isEmpty()) {
+                                  detailView.setText("yt-dlp " + shownVersion + " · 저장 위치: Download/AuthorizedVideoSaver");
+                              }
+                              downloadButton.setEnabled(true);
+                          });
+                      } catch (Exception e) {
+                          runOnUiThread(() -> {
+                              statusView.setText("초기화 실패");
+                              detailView.setText(safeMessage(e));
+                          });
+                      }
+                  });
+              }
+
+              private void startDownload() {
+                  if (!ready) {
+                      toast("다운로드 엔진 준비가 끝날 때까지 잠시 기다려 주세요.");
+                      return;
+                  }
+                  if (downloading) {
+                      toast("이미 다운로드 중입니다.");
+                      return;
+                  }
+
+                  final String url = urlInput.getText().toString().trim();
+                  if (TextUtils.isEmpty(url)) {
+                      toast("YouTube 주소를 입력하세요.");
+                      return;
+                  }
+                  if (!isYouTubeUrl(url)) {
+                      toast("youtube.com 또는 youtu.be 주소만 지원합니다.");
+                      return;
+                  }
+
+                  final int qualityIndex = qualitySpinner.getSelectedItemPosition();
+                  final boolean mp3Mode = formatSpinner.getSelectedItemPosition() == 1;
+                  preferences.edit()
+                      .putString("last_url", url)
+                      .putInt("save_format", mp3Mode ? 1 : 0)
+                      .apply();
+                  downloading = true;
+                  processId = "yt_" + UUID.randomUUID();
+                  downloadButton.setEnabled(false);
+                  cancelButton.setEnabled(true);
+                  progressBar.setProgress(0);
+                  statusView.setText(mp3Mode ? "MP3 저장 준비 중..." : "다운로드 준비 중...");
+                  detailView.setText(mp3Mode ? "오디오 정보를 확인하고 있습니다." : "영상 정보를 확인하고 있습니다.");
+
+                  executor.execute(() -> doDownload(url, qualityIndex, mp3Mode));
+              }
+
+              private void doDownload(String url, int qualityIndex, boolean mp3Mode) {
+                  File workDir = new File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "yt_temp");
+                  deleteRecursively(workDir);
+                  if (!workDir.exists()) workDir.mkdirs();
+
+                  try {
+                      YoutubeDLRequest request = new YoutubeDLRequest(url);
+                      request.addOption("--no-playlist");
+                      request.addOption("--no-mtime");
+                      request.addOption("--newline");
+                      if (mp3Mode) {
+                          request.addOption("-f", "bestaudio/best");
+                          request.addOption("-x");
+                          request.addOption("--audio-format", "mp3");
+                          request.addOption("--audio-quality", "0");
+                      } else {
+                          request.addOption("--merge-output-format", "mp4");
+                          request.addOption("-f", formatFor(qualityIndex));
+                      }
+                      request.addOption("-o", new File(workDir, "%(title).150B [%(id)s].%(ext)s").getAbsolutePath());
+
+                      Function3<Float, Long, String, Unit> callback = (progress, eta, line) -> {
+                          runOnUiThread(() -> {
+                              int p = Math.max(0, Math.min(100, Math.round(progress)));
+                              progressBar.setProgress(p);
+                              statusView.setText((mp3Mode ? "MP3 저장 중... " : "다운로드 중... ") + p + "%");
+                              if (line != null && !line.trim().isEmpty()) {
+                                  detailView.setText(cleanLine(line));
+                              } else if (eta >= 0) {
+                                  detailView.setText("남은 시간 약 " + eta + "초");
+                              }
+                          });
+                          return Unit.INSTANCE;
+                      };
+
+                      YoutubeDL.getInstance().execute(request, processId, callback);
+
+                      File media = findOutputFile(workDir);
+                      if (media == null) {
+                          throw new Exception(mp3Mode ? "완료된 MP3 파일을 찾지 못했습니다." : "완료된 영상 파일을 찾지 못했습니다.");
+                      }
+
+                      String savedName = publishToDownloads(media);
+                      deleteRecursively(workDir);
+
+                      runOnUiThread(() -> {
+                          progressBar.setProgress(100);
+                          statusView.setText(mp3Mode ? "MP3 저장 완료" : "다운로드 완료");
+                          detailView.setText("저장 완료: Download/AuthorizedVideoSaver/" + savedName);
+                          finishDownloadState();
+                      });
+                  } catch (Exception e) {
+                      final String msg = safeMessage(e);
+                      deleteRecursively(workDir);
+                      runOnUiThread(() -> {
+                          progressBar.setProgress(0);
+                          statusView.setText("다운로드 실패");
+                          detailView.setText(msg);
+                          finishDownloadState();
+                      });
+                  }
+              }
+
+              private String formatFor(int index) {
+                  switch (index) {
+                      case 0:
+                          return "bestvideo+bestaudio/best";
+                      case 2:
+                          return "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]";
+                      case 3:
+                          return "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]";
+                      case 1:
+                      default:
+                          return "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]";
+                  }
+              }
+
+              private void cancelDownload() {
+                  if (!downloading || processId == null) return;
+                  try {
+                      boolean stopped = YoutubeDL.getInstance().destroyProcessById(processId);
+                      statusView.setText(stopped ? "취소 요청됨" : "취소할 작업이 없습니다.");
+                  } catch (Exception e) {
+                      detailView.setText(safeMessage(e));
+                  }
+              }
+
+              private void finishDownloadState() {
+                  downloading = false;
+                  processId = null;
+                  downloadButton.setEnabled(ready);
+                  cancelButton.setEnabled(false);
+              }
+
+              private File findOutputFile(File dir) {
+                  File[] files = dir.listFiles(file -> file.isFile()
+                      && !file.getName().endsWith(".part")
+                      && !file.getName().endsWith(".ytdl")
+                      && isMediaFile(file.getName()));
+                  if (files == null || files.length == 0) return null;
+                  return Arrays.stream(files)
+                      .max(Comparator.comparingLong(File::length))
+                      .orElse(null);
+              }
+
+              private boolean isMediaFile(String name) {
+                  String n = name.toLowerCase(Locale.ROOT);
+                  return n.endsWith(".mp4") || n.endsWith(".webm") || n.endsWith(".mkv") ||
+                         n.endsWith(".m4a") || n.endsWith(".mov") || n.endsWith(".mp3");
+              }
+
+              private String publishToDownloads(File source) throws Exception {
+                  String displayName = source.getName();
+                  String mime = mimeFor(displayName);
+
+                  ContentValues values = new ContentValues();
+                  values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
+                  values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                  values.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                      Environment.DIRECTORY_DOWNLOADS + "/AuthorizedVideoSaver");
+                  values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+
+                  ContentResolver resolver = getContentResolver();
+                  Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                  if (uri == null) throw new Exception("다운로드 폴더에 파일을 만들 수 없습니다.");
+
+                  try (InputStream in = new FileInputStream(source);
+                       OutputStream out = resolver.openOutputStream(uri)) {
+                      if (out == null) throw new Exception("저장 파일을 열 수 없습니다.");
+                      byte[] buffer = new byte[1024 * 256];
+                      int len;
+                      while ((len = in.read(buffer)) != -1) out.write(buffer, 0, len);
+                      out.flush();
+                  } catch (Exception e) {
+                      resolver.delete(uri, null, null);
+                      throw e;
+                  }
+
+                  ContentValues done = new ContentValues();
+                  done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                  resolver.update(uri, done, null, null);
+                  return displayName;
+              }
+
+              private String mimeFor(String name) {
+                  String n = name.toLowerCase(Locale.ROOT);
+                  if (n.endsWith(".webm")) return "video/webm";
+                  if (n.endsWith(".mkv")) return "video/x-matroska";
+                  if (n.endsWith(".mov")) return "video/quicktime";
+                  if (n.endsWith(".m4a")) return "audio/mp4";
+                  if (n.endsWith(".mp3")) return "audio/mpeg";
+                  return "video/mp4";
+              }
+
+              private boolean isYouTubeUrl(String url) {
+                  try {
+                      Uri u = Uri.parse(url);
+                      String host = u.getHost();
+                      if (host == null) return false;
+                      host = host.toLowerCase(Locale.ROOT);
+                      return host.equals("youtu.be") || host.endsWith("youtube.com") ||
+                             host.endsWith("youtube-nocookie.com");
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              private void applyClipboardYoutubeUrlIfPresent() {
+                  try {
+                      android.content.ClipboardManager cm =
+                          (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                      if (cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip() == null ||
+                          cm.getPrimaryClip().getItemCount() == 0) return;
+                      CharSequence text = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+                      if (text == null) return;
+                      String candidate = extractUrl(text.toString());
+                      if (isYouTubeUrl(candidate) && urlInput != null) {
+                          String current = urlInput.getText() == null ? "" : urlInput.getText().toString().trim();
+                          if (!candidate.equals(current)) {
+                              urlInput.setText(candidate);
+                              urlInput.setSelection(urlInput.getText().length());
+                          }
+                      }
+                  } catch (Exception ignored) {
+                  }
+              }
+
+              private void pasteClipboard() {
+                  android.content.ClipboardManager cm =
+                      (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                  if (cm != null && cm.hasPrimaryClip() && cm.getPrimaryClip() != null &&
+                      cm.getPrimaryClip().getItemCount() > 0) {
+                      CharSequence text = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+                      if (text != null) urlInput.setText(extractUrl(text.toString()));
+                  } else {
+                      toast("클립보드에 주소가 없습니다.");
+                  }
+              }
+
+              private void receiveSharedText(Intent intent) {
+                  if (intent == null) return;
+                  if (Intent.ACTION_SEND.equals(intent.getAction()) && "text/plain".equals(intent.getType())) {
+                      String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
+                      if (shared != null && urlInput != null) urlInput.setText(extractUrl(shared));
+                  }
+              }
+
+              private String extractUrl(String text) {
+                  if (text == null) return "";
+                  for (String part : text.split("\\s+")) {
+                      if (part.startsWith("https://") || part.startsWith("http://")) return part.trim();
+                  }
+                  return text.trim();
+              }
+
+              private void openDownloadFolder() {
+                  File target = new File(
+                      Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                      "AuthorizedVideoSaver"
+                  );
+
+                  if (Build.MANUFACTURER != null &&
+                      Build.MANUFACTURER.toLowerCase(Locale.ROOT).contains("samsung")) {
+                      try {
+                          Intent samsung = getPackageManager()
+                              .getLaunchIntentForPackage("com.sec.android.app.myfiles");
+                          if (samsung != null) {
+                              samsung.setAction("samsung.myfiles.intent.action.LAUNCH_MY_FILES");
+                              samsung.putExtra("samsung.myfiles.intent.extra.START_PATH",
+                                  target.getAbsolutePath());
+                              samsung.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK |
+                                  Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                              startActivity(samsung);
+                              return;
+                          }
+                      } catch (Exception ignored) {
+                      }
+                  }
+
+                  try {
+                      Intent downloads = new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS);
+                      downloads.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      startActivity(downloads);
+                      return;
+                  } catch (Exception ignored) {
+                  }
+
+                  try {
+                      Uri uri = Uri.parse(
+                          "content://com.android.externalstorage.documents/document/primary%3ADownload%2FAuthorizedVideoSaver"
+                      );
+                      Intent intent = new Intent(Intent.ACTION_VIEW);
+                      intent.setDataAndType(uri, "resource/folder");
+                      intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                          Intent.FLAG_ACTIVITY_NEW_TASK);
+                      startActivity(intent);
+                  } catch (Exception e) {
+                      toast("내 파일 → 다운로드 → AuthorizedVideoSaver 폴더를 열어 주세요.");
+                  }
+              }
+
+              private void deleteRecursively(File file) {
+                  if (file == null || !file.exists()) return;
+                  if (file.isDirectory()) {
+                      File[] children = file.listFiles();
+                      if (children != null) for (File child : children) deleteRecursively(child);
+                  }
+                  file.delete();
+              }
+
+              private String cleanLine(String line) {
+                  String s = line.replace('\r', ' ').trim();
+                  if (s.length() > 180) s = s.substring(s.length() - 180);
+                  return s;
+              }
+
+              private String safeMessage(Throwable e) {
+                  String m = e == null ? null : e.getMessage();
+                  if (m == null || m.trim().isEmpty()) return "알 수 없는 오류가 발생했습니다.";
+                  if (m.length() > 700) m = m.substring(m.length() - 700);
+                  return m;
+              }
+
+              private int dp(int value) {
+                  return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private void toast(String text) {
+                  Toast.makeText(this, text, Toast.LENGTH_LONG).show();
+              }
+          }
+          EOF
+
+      - name: Restore fixed update signing key
+        run: |
+          echo "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" | base64 -d > authorizedvideosaver-update.jks
+          keytool -list -keystore authorizedvideosaver-update.jks \
+            -storepass avs25update -alias authorizedvideosaver >/dev/null
+
+      - name: Build v2.5 release APK
+        run: gradle --no-daemon :app:assembleRelease
+
+      - name: Verify APK signature
+        run: |
+          test -f app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs \
+            app/build/outputs/apk/release/app-release.apk
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk AuthorizedVideoSaver_v2_5_StableUpdate.apk
+
+      - name: Upload v2.5 APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuthorizedVideoSaver-v2.5-StableUpdate-APK
+          path: AuthorizedVideoSaver_v2_5_StableUpdate.apk
+          if-no-files-found: error
